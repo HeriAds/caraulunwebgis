@@ -448,11 +448,27 @@ document.getElementById("hd").onclick = function(){
 
 // ====================== MODE EDIT (Supabase) ======================
 if (CONFIG.edit && CONFIG.edit.enabled && CONFIG.edit.url && CONFIG.edit.key){
-  var sbs = document.createElement("script");
-  sbs.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js";
-  sbs.onload = function(){ map.on("load", setupEditor); if (map.loaded()) setupEditor(); };
-  sbs.onerror = function(){ console.warn("Supabase gagal dimuat"); };
-  document.head.appendChild(sbs);
+  map.on("load", setupEditor);
+  if (map.loaded()) setupEditor();
+}
+
+// muat pustaka Supabase HANYA saat dibutuhkan (agar tombol tetap muncul walau lambat)
+var _sb = null, _sbLoading = null;
+function ensureSb(){
+  var E = CONFIG.edit;
+  if (_sb) return Promise.resolve(_sb);
+  if (_sbLoading) return _sbLoading;
+  _sbLoading = new Promise(function(res, rej){
+    var s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js";
+    s.onload = function(){
+      try { _sb = window.supabase.createClient(E.url, E.key); res(_sb); }
+      catch(e){ rej(e); }
+    };
+    s.onerror = function(){ rej(new Error("Gagal memuat pustaka Supabase (cek internet).")); };
+    document.head.appendChild(s);
+  });
+  return _sbLoading;
 }
 
 var _editorReady = false;
@@ -461,7 +477,6 @@ function setupEditor(){
   try {
   var E = CONFIG.edit;
   var TABLE = E.table || "features";
-  var sb = window.supabase.createClient(E.url, E.key);
   var session = null;
   var drawType = null, drawCoords = [];
   var ECOLOR = "#e11d48";
@@ -520,37 +535,55 @@ function setupEditor(){
     if(!on){ cancelDraw(); }
   }
 
-  // ---- auth ----
-  sb.auth.getSession().then(function(r){ session=r.data.session; refreshUI(); });
-  sb.auth.onAuthStateChange(function(_e,s){ session=s; refreshUI(); });
+  // ---- tampilkan bar SEGERA (tak menunggu Supabase termuat) ----
+  refreshUI();
+  elBar.hidden=false;
+
+  // ---- login / logout (Supabase dimuat saat diklik) ----
   elLogin.onclick=function(){ elBox.hidden=false; };
   document.getElementById("eLoginCancel").onclick=function(){ elBox.hidden=true; };
-  document.getElementById("eDoLogin").onclick=async function(){
+  document.getElementById("eDoLogin").onclick=function(){
     var email=document.getElementById("eEmail").value.trim();
     var pass=document.getElementById("ePass").value;
-    var r=await sb.auth.signInWithPassword({email:email,password:pass});
-    if(r.error){ alert("Login gagal: "+r.error.message); return; }
-    document.getElementById("ePass").value=""; elBox.hidden=true;
+    var btn=document.getElementById("eDoLogin"); btn.disabled=true; btn.textContent="Masuk…";
+    ensureSb().then(function(sb){ return sb.auth.signInWithPassword({email:email,password:pass}); })
+      .then(function(r){
+        btn.disabled=false; btn.textContent="Masuk";
+        if(r.error){
+          alert("Login gagal: "+r.error.message+
+            "\n\nCek di Supabase: user sudah dibuat (Authentication → Users) & "+
+            "berstatus 'confirmed', serta email/password benar.");
+          return;
+        }
+        document.getElementById("ePass").value=""; elBox.hidden=true;
+      })
+      .catch(function(e){ btn.disabled=false; btn.textContent="Masuk"; alert("Login gagal: "+(e.message||e)); });
   };
-  elLogout.onclick=async function(){ await sb.auth.signOut(); };
+  elLogout.onclick=function(){ ensureSb().then(function(sb){ sb.auth.signOut(); }); };
 
-  // ---- muat data editan ----
+  // ---- data editan + status login (dimuat di belakang) ----
   async function loadEdits(){
     try{
+      var sb=await ensureSb();
       var r=await sb.from(TABLE).select("*");
       if(r.error){ console.warn(r.error.message); return; }
       var feats=(r.data||[]).map(function(row){
         return {type:"Feature", properties:{id:row.id, note:row.note, gtype:row.gtype},
                 geometry:row.geojson};
       });
-      map.getSource("edits").setData({type:"FeatureCollection", features:feats});
+      if(map.getSource("edits"))
+        map.getSource("edits").setData({type:"FeatureCollection", features:feats});
     }catch(e){ console.warn(e); }
   }
-  loadEdits();
-  try{
-    sb.channel("rt-"+TABLE).on("postgres_changes",
-      {event:"*", schema:"public", table:TABLE}, loadEdits).subscribe();
-  }catch(e){}
+  ensureSb().then(function(sb){
+    sb.auth.getSession().then(function(r){ session=r.data.session; refreshUI(); });
+    sb.auth.onAuthStateChange(function(_e,s){ session=s; refreshUI(); });
+    loadEdits();
+    try{
+      sb.channel("rt-"+TABLE).on("postgres_changes",
+        {event:"*", schema:"public", table:TABLE}, loadEdits).subscribe();
+    }catch(e){}
+  }).catch(function(e){ console.warn(e); });
 
   // ---- popup objek editan (lihat / edit / hapus) ----
   ["ed-pt","ed-line","ed-fill"].forEach(function(lid){
@@ -577,11 +610,13 @@ function setupEditor(){
 
   async function editNote(id, old){
     var n=prompt("Ubah catatan:", old||""); if(n===null) return;
+    var sb=await ensureSb();
     var r=await sb.from(TABLE).update({note:n}).eq("id",id);
     if(r.error) alert("Gagal: "+r.error.message); else loadEdits();
   }
   async function delFeature(id){
     if(!confirm("Hapus objek ini?")) return;
+    var sb=await ensureSb();
     var r=await sb.from(TABLE).delete().eq("id",id);
     if(r.error) alert("Gagal: "+r.error.message); else loadEdits();
   }
@@ -631,14 +666,11 @@ function setupEditor(){
   });
   async function saveFeature(gtype, geometry){
     var note=prompt("Catatan untuk "+gtype+":",""); if(note===null){ cancelDraw(); return; }
+    var sb=await ensureSb();
     var r=await sb.from(TABLE).insert({gtype:gtype, geojson:geometry, note:note});
     cancelDraw();
     if(r.error) alert("Gagal menyimpan: "+r.error.message); else loadEdits();
   }
-
-  // tampilkan bar HANYA setelah semua siap & handler terpasang
-  refreshUI();
-  elBar.hidden=false;
   } catch(err){
     console.error(err);
     alert("Mode edit gagal dimuat: " + (err && err.message ? err.message : err));
