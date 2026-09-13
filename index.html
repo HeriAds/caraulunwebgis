@@ -33,6 +33,9 @@
   .rowc{display:flex;align-items:center;gap:9px;padding:5px 0;font-size:14px;color:#16211f;}
   .rowc input{width:16px;height:16px;accent-color:#0e7c86;cursor:pointer;flex:none;}
   .rowc .nm{cursor:pointer;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .rowc.active{background:#1e6fd9;border-radius:6px;padding-left:6px;}
+  .rowc.active .nm{color:#fff;font-weight:600;}
+  .rowc.active .cnt{color:#dbeafe;}
   .sw{width:14px;height:14px;border-radius:4px;flex:none;border:1px solid rgba(0,0,0,.15);}
   .cnt{font-size:11px;color:#8a988f;flex:none;}
   .zbtn{border:1px solid #cfd6d3;background:#fff;border-radius:6px;cursor:pointer;
@@ -111,7 +114,7 @@
         </div>
       </div>
       <div class="sec">
-        <p class="lbl">Layer</p>
+        <p class="lbl">Layer — klik nama untuk info di peta</p>
         <div id="layers"></div>
       </div>
     </div>
@@ -207,6 +210,12 @@ document.getElementById("credit").innerHTML = esc(base.attr) + " · MapLibre";
 var clickable = [];
 var nameById = {};
 var EMPTY = {type:"FeatureCollection", features:[]};
+var activeLayerId = null;      // layer aktif (QGIS-style): klik nama di panel
+var _rowById = {};
+function setActiveLayer(id){
+  activeLayerId = (activeLayerId === id) ? null : id;
+  for (var k in _rowById){ _rowById[k].classList.toggle("active", k === activeLayerId); }
+}
 
 map.on("load", function(){
   try {
@@ -267,6 +276,7 @@ map.on("load", function(){
     var rid = pair[0], did = pair[1];
     map.on("click", rid, function(e){
       if (measureMode) return;              // saat mengukur, jangan buka atribut
+      if (activeLayerId && did !== activeLayerId) return;  // hanya layer terpilih
       if (!e.features || !e.features.length) return;
       var p = e.features[0].properties || {};
       var rows = "";
@@ -281,7 +291,8 @@ map.on("load", function(){
         "<div class='pp-title'>"+esc(nameById[did]||"")+"</div><table class='pp'>"+rows+"</table>"
       ).addTo(map);
     });
-    map.on("mouseenter", rid, function(){ if(!measureMode) map.getCanvas().style.cursor="pointer"; });
+    map.on("mouseenter", rid, function(){
+      if(!measureMode && (!activeLayerId || activeLayerId===did)) map.getCanvas().style.cursor="pointer"; });
     map.on("mouseleave", rid, function(){ if(!measureMode) map.getCanvas().style.cursor=""; });
   });
 
@@ -310,8 +321,8 @@ function buildLayerList(){
     var sw = document.createElement("span");
     sw.className = "sw"; sw.style.background = L.color;
     var nm = document.createElement("span");
-    nm.className = "nm"; nm.textContent = L.name; nm.title = L.name;
-    nm.onclick = function(){ cb.checked = !cb.checked; cb.onchange(); };
+    nm.className = "nm"; nm.textContent = L.name; nm.title = "Klik untuk pilih layer ini (info di peta)";
+    nm.onclick = function(){ setActiveLayer(L.id); };
     var ct = document.createElement("span"); ct.className = "cnt"; ct.textContent = L.count;
     var zb = document.createElement("button");
     zb.className = "zbtn"; zb.textContent = "⤢"; zb.title = "Zoom ke layer";
@@ -321,6 +332,7 @@ function buildLayerList(){
     row.appendChild(cb); row.appendChild(sw); row.appendChild(nm);
     row.appendChild(ct); row.appendChild(zb);
     box.appendChild(row);
+    _rowById[L.id] = row;
   });
 }
 
