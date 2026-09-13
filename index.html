@@ -214,7 +214,9 @@ map.on("load", function(){
                   paint:{"hillshade-exaggeration":0.45}});
   } catch(e){}
 
-  CONFIG.layers.forEach(function(L){
+  // Tambahkan dari layer PALING BAWAH dulu (urutan QGIS: index 0 = paling atas),
+  // supaya layer atas QGIS tetap tampil di atas pada peta web.
+  CONFIG.layers.slice().reverse().forEach(function(L){
     nameById[L.id] = L.name;
     map.addSource(L.id, {type:"geojson", data:L.geojson});
     L._render = [];
