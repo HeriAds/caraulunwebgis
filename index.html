@@ -78,6 +78,9 @@
   .lbox .row{display:flex;gap:8px;justify-content:flex-end;}
   .lbox button{padding:7px 12px;border:1px solid #cfd6d3;border-radius:8px;background:#fff;cursor:pointer;}
   .lbox button.pri{background:#0e7c86;border-color:#0e7c86;color:#fff;}
+  .lbox textarea{width:100%;min-height:56px;padding:8px;border:1px solid #cfd6d3;border-radius:8px;
+        box-sizing:border-box;margin-bottom:8px;font-family:inherit;font-size:14px;}
+  .lbox input[type=file]{width:100%;margin-bottom:8px;font-size:13px;}
   @media (max-width:520px){ .hud{max-width:calc(100vw - 20px);} }
 </style>
 </head>
@@ -127,12 +130,22 @@
   <button id="eLogin" class="pri">🔑 Login editor</button>
   <span class="who" id="eWho" hidden></span>
   <span id="eTools" hidden></span>
+  <button id="eDownload">⬇ GeoJSON</button>
   <button id="eLogout" hidden>Keluar</button>
   <span id="eDraw" hidden>
     <span id="eHint" style="font-size:12px;color:#555;"></span>
     <button id="eFinish" class="pri">Selesai</button>
     <button id="eCancel">Batal</button>
   </span>
+</div>
+<div class="lbox" id="ptbox" hidden>
+  <h3>Titik baru</h3>
+  <textarea id="ptNote" placeholder="Catatan (opsional)"></textarea>
+  <input type="file" id="ptPhoto" accept="image/*" capture="environment">
+  <div class="row">
+    <button id="ptCancel">Batal</button>
+    <button id="ptSave" class="pri">Simpan</button>
+  </div>
 </div>
 <div class="lbox" id="lbox" hidden>
   <h3>Login Editor</h3>
@@ -178,6 +191,22 @@ function copyText(t, btn){
   if(navigator.clipboard && navigator.clipboard.writeText){
     navigator.clipboard.writeText(t).then(done, fallback);
   } else { fallback(); }
+}
+
+function resizeImage(file, maxDim, quality){
+  return new Promise(function(res, rej){
+    var url=URL.createObjectURL(file); var img=new Image();
+    img.onload=function(){
+      var w=img.width, h=img.height, s=Math.min(1, maxDim/Math.max(w,h));
+      var cw=Math.max(1,Math.round(w*s)), ch=Math.max(1,Math.round(h*s));
+      var cv=document.createElement("canvas"); cv.width=cw; cv.height=ch;
+      cv.getContext("2d").drawImage(img,0,0,cw,ch);
+      URL.revokeObjectURL(url);
+      cv.toBlob(function(b){ b?res(b):rej(new Error("gagal memproses gambar")); }, "image/jpeg", quality||0.7);
+    };
+    img.onerror=function(){ URL.revokeObjectURL(url); rej(new Error("gagal membaca gambar")); };
+    img.src=url;
+  });
 }
 
 var bm0 = CONFIG.basemap || "osm";
@@ -576,6 +605,28 @@ function setupEditor(){
   };
   elLogout.onclick=function(){ ensureSb().then(function(sb){ sb.auth.signOut(); }); };
 
+  // ---- unduh semua objek editan sebagai GeoJSON (untuk QGIS) ----
+  document.getElementById("eDownload").onclick=function(){
+    var b=document.getElementById("eDownload"); var old=b.textContent; b.textContent="…";
+    ensureSb().then(async function(sb){
+      var r=await sb.from(TABLE).select("*");
+      b.textContent=old;
+      if(r.error){ alert("Gagal mengambil data: "+r.error.message); return; }
+      var rows=r.data||[];
+      if(!rows.length){ alert("Belum ada objek editan untuk diunduh."); return; }
+      var fc={type:"FeatureCollection", features: rows.map(function(row){
+        return {type:"Feature",
+                properties:{id:row.id, gtype:row.gtype, note:row.note,
+                            photo:row.photo, created_at:row.created_at},
+                geometry:row.geojson}; })};
+      var blob=new Blob([JSON.stringify(fc)], {type:"application/geo+json"});
+      var url=URL.createObjectURL(blob);
+      var a=document.createElement("a"); a.href=url; a.download="webgis_edits.geojson";
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 1500);
+    }).catch(function(e){ b.textContent=old; alert("Gagal: "+(e.message||e)); });
+  };
+
   // ---- data editan + status login (dimuat di belakang) ----
   async function loadEdits(){
     try{
@@ -583,7 +634,8 @@ function setupEditor(){
       var r=await sb.from(TABLE).select("*");
       if(r.error){ console.warn(r.error.message); return; }
       var feats=(r.data||[]).map(function(row){
-        return {type:"Feature", properties:{id:row.id, note:row.note, gtype:row.gtype},
+        return {type:"Feature",
+                properties:{id:row.id, note:row.note, gtype:row.gtype, photo:row.photo},
                 geometry:row.geojson};
       });
       if(map.getSource("edits"))
@@ -609,6 +661,11 @@ function setupEditor(){
       var box=document.createElement("div");
       box.innerHTML="<div class='pp-title'>Catatan</div><div style='font-size:13px;max-width:240px'>"+
         esc(p.note||"(tanpa catatan)")+"</div>";
+      if(p.photo){
+        box.innerHTML += "<div style='margin-top:8px'><a href='"+esc(p.photo)+
+          "' target='_blank' rel='noopener'><img src='"+esc(p.photo)+
+          "' style='max-width:240px;width:100%;border-radius:6px'></a></div>";
+      }
       if(session){
         var row=document.createElement("div"); row.style.marginTop="8px";
         var be=document.createElement("button"); be.textContent="Edit"; be.style.marginRight="6px";
@@ -673,12 +730,42 @@ function setupEditor(){
       saveFeature("area",{type:"Polygon",coordinates:[drawCoords.concat([drawCoords[0]])]});
     else alert("Titik belum cukup.");
   };
+  var pendingCoord=null;
+  var elPt=document.getElementById("ptbox"),
+      ptNote=document.getElementById("ptNote"),
+      ptPhoto=document.getElementById("ptPhoto");
   map.on("click", function(e){
     if(!drawType || !session) return;
     var c=[e.lngLat.lng, e.lngLat.lat];
-    if(drawType==="point"){ saveFeature("point",{type:"Point",coordinates:c}); return; }
+    if(drawType==="point"){
+      pendingCoord=c; ptNote.value=""; ptPhoto.value=""; elPt.hidden=false; return;
+    }
     drawCoords.push(c); updateDraw();
   });
+  document.getElementById("ptCancel").onclick=function(){ elPt.hidden=true; cancelDraw(); };
+  document.getElementById("ptSave").onclick=async function(){
+    var btn=this, old=btn.textContent; btn.disabled=true; btn.textContent="Menyimpan…";
+    try{
+      var note=ptNote.value||"";
+      var photoUrl=null;
+      var f=ptPhoto.files && ptPhoto.files[0];
+      var sb=await ensureSb();
+      if(f){
+        btn.textContent="Mengunggah foto…";
+        var blob=await resizeImage(f, 1280, 0.7);
+        var path="p_"+Date.now()+"_"+Math.random().toString(36).slice(2)+".jpg";
+        var up=await sb.storage.from("photos").upload(path, blob, {contentType:"image/jpeg", upsert:false});
+        if(up.error){ throw new Error("Upload foto gagal: "+up.error.message+" (cek bucket 'photos' sudah dibuat)"); }
+        photoUrl=sb.storage.from("photos").getPublicUrl(path).data.publicUrl;
+      }
+      var rec={gtype:"point", geojson:{type:"Point",coordinates:pendingCoord}, note:note};
+      if(photoUrl) rec.photo=photoUrl;
+      var r=await sb.from(TABLE).insert(rec);
+      if(r.error) throw new Error(r.error.message);
+      elPt.hidden=true; cancelDraw(); loadEdits();
+    }catch(err){ alert("Gagal menyimpan titik: "+(err.message||err)); }
+    finally{ btn.disabled=false; btn.textContent=old; }
+  };
   async function saveFeature(gtype, geometry){
     var note=prompt("Catatan untuk "+gtype+":",""); if(note===null){ cancelDraw(); return; }
     var sb=await ensureSb();
