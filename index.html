@@ -12,6 +12,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@turf/turf@7.1.0/turf.min.js"></script>
 <style>
   html,body{margin:0;height:100%;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;}
+  [hidden]{display:none!important;}
   #map{position:absolute;inset:0;}
   .hud{position:absolute;top:10px;left:10px;z-index:5;max-width:min(330px,86vw);}
   .card{background:rgba(255,255,255,.96);backdrop-filter:blur(4px);
@@ -162,6 +163,19 @@ else { document.getElementById("sub").style.display = "none"; }
 
 function esc(s){ return String(s).replace(/[&<>"]/g, function(c){
   return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]; }); }
+
+function copyText(t, btn){
+  function done(){ if(btn){ var o=btn.textContent; btn.textContent="✓ Tersalin"; setTimeout(function(){btn.textContent=o;},1500); } }
+  function fallback(){
+    try{ var ta=document.createElement("textarea"); ta.value=t; ta.style.position="fixed";
+      ta.style.opacity="0"; document.body.appendChild(ta); ta.focus(); ta.select();
+      document.execCommand("copy"); document.body.removeChild(ta); done(); }
+    catch(e){ window.prompt("Salin manual:", t); }
+  }
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(done, fallback);
+  } else { fallback(); }
+}
 
 var bm0 = CONFIG.basemap || "osm";
 var base = BASEMAPS[bm0] || BASEMAPS.osm;
@@ -406,10 +420,18 @@ map.on("click", function(e){
   if (!measureMode) return;
   if (measureMode === "coord"){
     var lat = e.lngLat.lat.toFixed(6), lng = e.lngLat.lng.toFixed(6);
-    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(
-      "<div class='pp-title'>Koordinat (WGS84)</div><table class='pp'>"+
+    var latlng = lat + ", " + lng;   // format Google Maps
+    var box = document.createElement("div");
+    box.innerHTML = "<div class='pp-title'>Koordinat (WGS84)</div><table class='pp'>"+
       "<tr><th>Lintang</th><td>"+lat+"</td></tr>"+
-      "<tr><th>Bujur</th><td>"+lng+"</td></tr></table>").addTo(map);
+      "<tr><th>Bujur</th><td>"+lng+"</td></tr></table>";
+    var b = document.createElement("button");
+    b.textContent = "📋 Salin (untuk Google Maps)";
+    b.style.cssText = "margin-top:8px;padding:6px 10px;border:1px solid #0e7c86;"+
+      "background:#0e7c86;color:#fff;border-radius:7px;cursor:pointer;font-size:12.5px;";
+    b.onclick = function(){ copyText(latlng, b); };
+    box.appendChild(b);
+    new maplibregl.Popup().setLngLat(e.lngLat).setDOMContent(box).addTo(map);
     return;
   }
   mCoords.push([e.lngLat.lng, e.lngLat.lat]);
@@ -436,6 +458,7 @@ if (CONFIG.edit && CONFIG.edit.enabled && CONFIG.edit.url && CONFIG.edit.key){
 var _editorReady = false;
 function setupEditor(){
   if (_editorReady) return; _editorReady = true;
+  try {
   var E = CONFIG.edit;
   var TABLE = E.table || "features";
   var sb = window.supabase.createClient(E.url, E.key);
@@ -477,7 +500,6 @@ function setupEditor(){
       elFinish=document.getElementById("eFinish"),
       elCancel=document.getElementById("eCancel"),
       elBox=document.getElementById("lbox");
-  elBar.hidden=false;
   if (E.email) document.getElementById("eEmail").value=E.email;
 
   // tombol tambah sesuai tipe yang diizinkan
@@ -612,6 +634,14 @@ function setupEditor(){
     var r=await sb.from(TABLE).insert({gtype:gtype, geojson:geometry, note:note});
     cancelDraw();
     if(r.error) alert("Gagal menyimpan: "+r.error.message); else loadEdits();
+  }
+
+  // tampilkan bar HANYA setelah semua siap & handler terpasang
+  refreshUI();
+  elBar.hidden=false;
+  } catch(err){
+    console.error(err);
+    alert("Mode edit gagal dimuat: " + (err && err.message ? err.message : err));
   }
 }
 </script>
